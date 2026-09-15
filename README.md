@@ -1,6 +1,7 @@
 # PixInsight Scripts
 
-A PixInsight update repository with a couple of PJSR scripts.
+A PixInsight update repository with a few PJSR scripts, all of them
+under the `SCRIPT > Toolbox` menu.
 
 ## Adding the repository
 
@@ -25,18 +26,19 @@ step as you go, and open the PixInsight process linked to every step.
 Workflows can be created, edited, exported and imported, and progress is
 saved automatically.
 
-Installs under `SCRIPT > Utilities > Processing Checklist`.
+Installs under `SCRIPT > Toolbox > Processing Checklist`.
 
-### Add Suffix
+### Add Prefix and Add Suffix
 
-Appends a configurable suffix to the identifier of an image. Run it from the
-Script menu, or save it as a process icon and drop that icon on any image to
-rename it without opening a dialog. It can also duplicate the image instead of
-renaming it.
+Prepend or append a configurable string to the identifier of an image. Run
+them from the Script menu, or save one as a process icon and drop that icon on
+any image to rename it without opening a dialog. They can also duplicate the
+image instead of renaming it.
 
-Installs under `SCRIPT > AAOC > Add Suffix`.
+Install under `SCRIPT > Toolbox > Add Prefix` and `SCRIPT > Toolbox > Add
+Suffix`.
 
-Both scripts require PixInsight 1.8.8 or later.
+All the scripts require PixInsight 1.8.8 or later.
 
 ## License
 

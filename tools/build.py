@@ -32,17 +32,19 @@ PACKAGE_SOURCE = "src/scripts"
 PACKAGE_DESCRIPTION = """Processing Checklist - an interactive processing cheat sheet. Keeps
                several predefined or user-defined workflows, lets you tick off
                each step as you go, and opens the PixInsight process associated
-               with every step. Installs under
-               SCRIPT &gt; Utilities &gt; Processing Checklist.
+               with every step.
             </p>
             <p>
-               Add Suffix - appends a configurable suffix to the identifier of an
-               image. Can be run from the Script menu or saved as a process icon
-               and dragged onto an image. Installs under
-               SCRIPT &gt; AAOC &gt; Add Suffix."""
+               Add Prefix / Add Suffix - prepend or append a configurable string
+               to the identifier of an image. Can be run from the Script menu or
+               saved as a process icon and dragged onto an image.
+            </p>
+            <p>
+               Everything installs under SCRIPT &gt; Toolbox."""
 
 REPO_DESCRIPTION = """PixInsight scripts repository. A single package with every script:
-         Processing Checklist and Add Suffix."""
+         Processing Checklist, Add Prefix and Add Suffix, all under
+         SCRIPT &gt; Toolbox."""
 
 # --- Implementation ----------------------------------------------------------
 

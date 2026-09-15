@@ -17,7 +17,7 @@
  * Copyright (c) 2026. Released under the MIT License.
  */
 
-#feature-id    Utilities > Processing Checklist
+#feature-id    Toolbox > Processing Checklist
 
 #feature-info  An interactive processing cheat sheet. Keeps several predefined or \
                user-defined workflows, lets you tick off each step as you go, and \
