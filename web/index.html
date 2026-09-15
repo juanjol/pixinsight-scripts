@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PixInsight scripts</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+  code { background: #f2f2f2; padding: .15em .35em; border-radius: .25em; }
+</style>
+<h1>PixInsight scripts</h1>
+<p>PixInsight update repository. In PixInsight go to
+   <code>RESOURCES &gt; Updates &gt; Manage Repositories &gt; Add</code> and paste this URL,
+   trailing slash included:</p>
+<p><code id="url"></code></p>
+<p>Then run <code>RESOURCES &gt; Updates &gt; Check for Updates</code>, apply, and restart
+   PixInsight.</p>
+<p><a href="updates/updates.xri">updates.xri</a></p>
+<script>
+  document.getElementById('url').textContent =
+    location.origin + location.pathname.replace(/\/?$/, '/') + 'updates/';
+</script>
