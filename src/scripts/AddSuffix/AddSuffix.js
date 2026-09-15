@@ -6,7 +6,7 @@
  * button) and dragged onto an image.
  */
 
-#feature-id    AddSuffix : AAOC > Add Suffix
+#feature-id    AddSuffix : Toolbox > Add Suffix
 #feature-info  Appends a configurable suffix to the identifier of an image.
 
 #include <pjsr/Sizer.jsh>
