@@ -42,7 +42,9 @@ jobs:
           set -euo pipefail
           mkdir -p site
           cp web/index.html site/index.html
-          cp -r updates site/updates
+          # The repository URL is the site root: PixInsight appends updates.xri
+          # to it and does not follow redirects.
+          cp updates/* site/
           touch site/.nojekyll
           find site -type f | sort
 

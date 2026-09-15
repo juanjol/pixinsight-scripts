@@ -8,7 +8,7 @@ A PixInsight update repository with a couple of PJSR scripts.
 2. Paste this URL, trailing slash included:
 
    ```
-   https://juanjol.github.io/pixinsight-scripts/updates/
+   https://juanjol.github.io/pixinsight-scripts/
    ```
 
 3. Run `RESOURCES > Updates > Check for Updates`, apply the updates and
