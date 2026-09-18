@@ -7,6 +7,9 @@
  *  - Scans a folder (optionally recursively) for light frames.
  *  - Measures them with the SubframeSelector process: FWHM, eccentricity,
  *    SNR, background level, noise, star count, star residual, altitude...
+ *    Frames are measured in batches, so SubframeSelector spreads them over
+ *    every core, and the measurement can be restricted to a central region
+ *    of the frame to make it several times faster.
  *  - Every measured variable can filter the frames, either with absolute
  *    limits or with a k-sigma clip around the robust median of the batch.
  *  - The file list is coloured in real time: green for the frames that are
@@ -39,7 +42,7 @@
 #include <pjsr/NumericControl.jsh>
 
 #define TITLE        "Subframe Culler"
-#define VERSION      "1.0.0"
+#define VERSION      "1.1.0"
 #define SETTINGS_KEY "SubframeCuller/settings"
 
 #define COLOR_KEEP   0xff1e8f3e
@@ -275,6 +278,10 @@ function defaultSettings()
       hotPixelFilter: true,
       pedestal:       0,
       fileCache:      true,
+      batchSize:      16,       // frames sent to SubframeSelector at once
+      maxPSFFits:     0,        // 0 leaves the default of the process
+      useROI:         false,
+      roiPercent:     50,       // side of the central region, per cent
       rejectsFolder:  "rejects",
       writeCSV:       true,
       criteria:       defaultCriteria()
@@ -347,7 +354,7 @@ function scanDirectory( directory, filter, recursive )
    return paths.sort();
 }
 
-function newSubframeSelector( paths )
+function newSubframeSelector( paths, roi )
 {
    var P = new SubframeSelector;
 
@@ -390,30 +397,100 @@ function newSubframeSelector( paths )
    try { P.nonInteractive = true; } catch ( x ) {}
    try { P.outputDirectory = ""; } catch ( x ) {}
 
+   // Fitting every star of a rich field is the slowest part of a measurement
+   // and buys very little once there are a few hundred of them.
+   if ( settings.maxPSFFits > 0 )
+      try { P.maxPSFFits = settings.maxPSFFits; } catch ( x ) {}
+
+   // Measuring a central region instead of the whole frame is the single
+   // biggest saving: the cost drops with the measured area.
+   if ( roi != null )
+      try
+      {
+         P.roiX0 = roi.x0;
+         P.roiY0 = roi.y0;
+         P.roiX1 = roi.x1;
+         P.roiY1 = roi.y1;
+      }
+      catch ( x )
+      {
+         console.warningln( "This build of SubframeSelector has no region of " +
+                            "interest, the whole frame is measured." );
+      }
+
    return P;
 }
 
 /*
- * Frames are measured one at a time so that the dialog can show the progress
- * and stay responsive. The measurement cache of SubframeSelector makes a
- * second pass over the same folder almost immediate.
+ * Geometry of a frame, read from the header alone: no pixel data is decoded,
+ * so it costs nothing next to a measurement.
  */
-function measureFile( path )
+function imageGeometry( path )
 {
-   var P = newSubframeSelector( [ path ] );
-   if ( !P.executeGlobal() )
-      return null;
-   var table = P.measurements;
-   if ( table == null || table.length == 0 )
-      return null;
-   var m = rowToMeasurement( table[0] );
-   // The table reports the path as SubframeSelector resolved it.
-   if ( m.path.length == 0 )
+   try
    {
-      m.path = path;
-      m.fileName = fileNameOf( path );
+      var fileFormat = new FileFormat( File.extractExtension( path ), true, false );
+      if ( fileFormat.isNull )
+         return null;
+      var file = new FileFormatInstance( fileFormat );
+      if ( file.isNull )
+         return null;
+      var description = file.open( path, "" );
+      file.close();
+      if ( description == null || description.length == 0 )
+         return null;
+      return { width: description[0].info.width,
+               height: description[0].info.height };
    }
-   return m;
+   catch ( x )
+   {
+      return null;
+   }
+}
+
+/*
+ * Central region covering the requested percentage of the side of the frame.
+ */
+function centralROI( geometry, percent )
+{
+   var f = Math.min( 1.0, Math.max( 0.05, percent/100 ) );
+   var w = Math.max( 64, Math.round( geometry.width*f ) );
+   var h = Math.max( 64, Math.round( geometry.height*f ) );
+   var x0 = Math.round( (geometry.width - w)/2 );
+   var y0 = Math.round( (geometry.height - h)/2 );
+   return { x0: x0, y0: y0, x1: x0 + w, y1: y0 + h };
+}
+
+/*
+ * Measures a group of frames in a single execution. SubframeSelector reads and
+ * measures the frames of one execution in parallel, so a batch is far faster
+ * than the same frames one by one; the batch size is what trades that
+ * parallelism for the granularity of the progress report and of the stop
+ * button. The measurement cache makes a second pass over the same folder
+ * almost immediate.
+ */
+function measureBatch( paths, roi )
+{
+   var P = newSubframeSelector( paths, roi );
+   if ( !P.executeGlobal() )
+      return [];
+   var table = P.measurements;
+   if ( table == null )
+      return [];
+
+   var result = [];
+   for ( var i = 0; i < table.length; ++i )
+   {
+      var m = rowToMeasurement( table[i] );
+      if ( m.path.length == 0 )
+      {
+         // Some builds return an empty path; the rows keep the input order.
+         m.path = (i < paths.length) ? paths[i] : "";
+         m.fileName = fileNameOf( m.path );
+      }
+      result.push( m );
+   }
+   return result;
 }
 
 // ----------------------------------------------------------------------------
@@ -958,6 +1035,83 @@ function SubframeCullerDialog()
    this.detection_Sizer.add( this.cache_Check );
    this.detection_Sizer.addStretch();
 
+   // --- Speed ----------------------------------------------------------------
+
+   this.batch_Numeric = new NumericEdit( this );
+   this.batch_Numeric.label.text = "Frames per batch:";
+   this.batch_Numeric.label.setScaledMinWidth( 90 );
+   this.batch_Numeric.setRange( 1, 512 );
+   this.batch_Numeric.setPrecision( 0 );
+   this.batch_Numeric.setValue( settings.batchSize );
+   this.batch_Numeric.toolTip =
+      "<p>Frames handed to SubframeSelector in a single execution. The " +
+      "process reads and measures the frames of one execution in parallel, " +
+      "so larger batches use every core and are much faster.</p>" +
+      "<p>The progress report and the Stop button only act between batches, " +
+      "which is the reason not to send the whole folder at once.</p>";
+   this.batch_Numeric.onValueUpdated = function( value )
+   {
+      settings.batchSize = Math.round( value );
+   };
+
+   this.maxFits_Numeric = new NumericEdit( this );
+   this.maxFits_Numeric.label.text = "Max PSF fits:";
+   this.maxFits_Numeric.setRange( 0, 100000 );
+   this.maxFits_Numeric.setPrecision( 0 );
+   this.maxFits_Numeric.setValue( settings.maxPSFFits );
+   this.maxFits_Numeric.toolTip =
+      "<p>Upper limit on the stars fitted per frame. Fitting is the slowest " +
+      "part of a measurement and a few hundred stars already give a stable " +
+      "FWHM and eccentricity, so lowering this speeds up rich fields a " +
+      "lot.</p><p>Zero keeps the default of the process.</p>";
+   this.maxFits_Numeric.onValueUpdated = function( value )
+   {
+      settings.maxPSFFits = Math.round( value );
+   };
+
+   this.roi_Check = new CheckBox( this );
+   this.roi_Check.text = "Central region only:";
+   this.roi_Check.checked = settings.useROI;
+   this.roi_Check.toolTip =
+      "<p>Measures a centred region of every frame instead of the whole " +
+      "frame. The cost drops with the measured area, so half the side is " +
+      "about four times faster.</p>" +
+      "<p>FWHM, eccentricity and background then describe the centre of the " +
+      "field, which is what usually decides whether a frame is worth " +
+      "keeping, but corner problems go unnoticed.</p>";
+   this.roi_Check.onCheck = function( checked )
+   {
+      settings.useROI = checked;
+      self.roi_Numeric.enabled = checked;
+   };
+
+   this.roi_Numeric = new NumericEdit( this );
+   this.roi_Numeric.label.visible = false;
+   this.roi_Numeric.setRange( 5, 100 );
+   this.roi_Numeric.setPrecision( 0 );
+   this.roi_Numeric.setValue( settings.roiPercent );
+   this.roi_Numeric.enabled = settings.useROI;
+   this.roi_Numeric.toolTip = "Side of the central region, as a percentage.";
+   this.roi_Numeric.onValueUpdated = function( value )
+   {
+      settings.roiPercent = Math.round( value );
+   };
+
+   this.roiPercent_Label = new Label( this );
+   this.roiPercent_Label.text = "% of the frame";
+   this.roiPercent_Label.textAlignment = TextAlign_Left | TextAlign_VertCenter;
+
+   this.speed_Sizer = new HorizontalSizer;
+   this.speed_Sizer.spacing = 6;
+   this.speed_Sizer.add( this.batch_Numeric );
+   this.speed_Sizer.addSpacing( 8 );
+   this.speed_Sizer.add( this.maxFits_Numeric );
+   this.speed_Sizer.addSpacing( 8 );
+   this.speed_Sizer.add( this.roi_Check );
+   this.speed_Sizer.add( this.roi_Numeric );
+   this.speed_Sizer.add( this.roiPercent_Label );
+   this.speed_Sizer.addStretch();
+
    this.measure_Group = new GroupBox( this );
    this.measure_Group.title = "Measurement";
    this.measure_Group.sizer = new VerticalSizer;
@@ -965,6 +1119,7 @@ function SubframeCullerDialog()
    this.measure_Group.sizer.spacing = 4;
    this.measure_Group.sizer.add( this.units_Sizer );
    this.measure_Group.sizer.add( this.detection_Sizer );
+   this.measure_Group.sizer.add( this.speed_Sizer );
 
    // --- Criteria -------------------------------------------------------------
 
@@ -1241,36 +1396,80 @@ function SubframeCullerDialog()
       console.writeln( "<end><cbr><br>" + TITLE + ": measuring " +
                        paths.length + " frames..." );
 
+      // The region of interest is in pixels, so the geometry of the first
+      // frame is read to place it. Every frame of a session shares it.
+      var roi = null;
+      if ( settings.useROI )
+      {
+         var geometry = imageGeometry( paths[0] );
+         if ( geometry == null )
+            console.warningln( "The geometry of the frames could not be read, " +
+                               "the whole frame is measured." );
+         else
+         {
+            roi = centralROI( geometry, settings.roiPercent );
+            console.writeln( format(
+               "Measuring the central %d x %d pixels of %d x %d.",
+               roi.x1 - roi.x0, roi.y1 - roi.y0,
+               geometry.width, geometry.height ) );
+         }
+      }
+
+      var startTime = Date.now();
+      var batchSize = Math.max( 1, Math.round( settings.batchSize ) );
       var failed = [];
       var partial = false;
-      for ( var i = 0; i < paths.length; ++i )
+      var measured = 0;
+
+      for ( var first = 0; first < paths.length; first += batchSize )
       {
          if ( this.aborted )
          {
             console.warningln( "Measurement stopped by the user." );
             break;
          }
-         this.windowTitle = format( "%s %s - measuring %d/%d",
-                                    TITLE, VERSION, i + 1, paths.length );
+
+         var batch = paths.slice( first, first + batchSize );
+         this.windowTitle = format( "%s %s - measuring %d-%d of %d",
+                                    TITLE, VERSION, first + 1,
+                                    first + batch.length, paths.length );
          processEvents();
 
-         var m = null;
+         var rows = [];
          try
          {
-            m = measureFile( paths[i] );
+            rows = measureBatch( batch, roi );
          }
          catch ( x )
          {
-            console.criticalln( fileNameOf( paths[i] ) + ": " + x );
+            console.criticalln( "Batch starting at " + fileNameOf( batch[0] ) +
+                                ": " + x );
          }
-         if ( m == null )
+
+         // A frame SubframeSelector could not read is simply missing from the
+         // table, so the batch is matched back against what was asked for.
+         var byPath = {};
+         for ( var r = 0; r < rows.length; ++r )
          {
-            failed.push( paths[i] );
-            continue;
+            if ( rows[r].partial )
+               partial = true;
+            byPath[rows[r].path] = rows[r];
+            byPath[rows[r].fileName] = rows[r];
          }
-         if ( m.partial )
-            partial = true;
-         this.measurements.push( m );
+         for ( var b = 0; b < batch.length; ++b )
+         {
+            var m = byPath[batch[b]] || byPath[fileNameOf( batch[b] )];
+            if ( m == null )
+            {
+               failed.push( batch[b] );
+               continue;
+            }
+            this.measurements.push( m );
+            ++measured;
+         }
+
+         console.writeln( format( "   %d/%d frames measured.",
+                                  measured, paths.length ) );
       }
 
       this.windowTitle = TITLE + " " + VERSION;
@@ -1289,7 +1488,11 @@ function SubframeCullerDialog()
             console.warningln( "   " + fileNameOf( failed[f] ) );
       }
 
-      console.writeln( format( "%d frames measured.", this.measurements.length ) );
+      var elapsed = (Date.now() - startTime)/1000;
+      console.noteln( format( "%d frames measured in %.1f s (%.2f s/frame).",
+                              this.measurements.length, elapsed,
+                              (this.measurements.length > 0) ?
+                                 elapsed/this.measurements.length : 0 ) );
 
       this.stats = computeStatistics( this.measurements );
       for ( var r = 0; r < this.rows.length; ++r )

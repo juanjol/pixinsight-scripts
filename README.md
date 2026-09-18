@@ -30,6 +30,11 @@ and how the median quality improves. Frames can be pinned so the filters never
 touch them. Accepting moves the rejected files to a `rejects` subfolder and
 writes a CSV with every measurement.
 
+Measurement speed is tunable: frames are measured in batches so that
+SubframeSelector spreads them over every core, the number of PSF fits per frame
+can be capped, and the measurement can be restricted to a central region of the
+frame, which is the biggest saving of the three.
+
 Installs under `SCRIPT > Toolbox > Subframe Culler`.
 
 ### Processing Checklist
