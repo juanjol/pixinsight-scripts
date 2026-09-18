@@ -42,7 +42,7 @@
 #include <pjsr/NumericControl.jsh>
 
 #define TITLE        "Subframe Culler"
-#define VERSION      "1.1.1"
+#define VERSION      "1.1.2"
 #define SETTINGS_KEY "SubframeCuller/settings"
 
 #define COLOR_KEEP   0xff1e8f3e
@@ -69,6 +69,38 @@ function enumValue( name, fallback )
    {
    }
    return fallback;
+}
+
+/*
+ * Warnings that would otherwise be repeated once per batch.
+ */
+var warnedAbout = {};
+
+function warnOnce( key, message )
+{
+   if ( warnedAbout[key] )
+      return;
+   warnedAbout[key] = true;
+   console.warningln( message );
+}
+
+/*
+ * Assigns a process parameter, and says whether the process has it at all.
+ */
+function setParameter( P, name, value )
+{
+   try
+   {
+      P[name] = value;
+      return true;
+   }
+   catch ( x )
+   {
+      warnOnce( "param:" + name,
+                "This build of SubframeSelector has no \"" + name +
+                "\" parameter, its default is used." );
+      return false;
+   }
 }
 
 function isFiniteNumber( x )
@@ -211,21 +243,60 @@ var LAYOUT_MIDDLE_1_8_9 =
      "psfFluxPower", "psfTotalMeanFlux", "psfTotalMeanPowerFlux", "psfCount",
      "mStar", "nStar" ];
 
-function layoutFor( columns )
+/*
+ * Reading the tail from the end of the row assumes nothing was ever appended
+ * after it, which is exactly the assumption that broke when the table grew in
+ * the first place. So the position of the tail is not assumed: every position
+ * is tried, from the end backwards, and the first one whose values are
+ * physically possible wins.
+ */
+function tailFitsAt( row, start )
 {
-   var known = LAYOUT_HEAD.length + LAYOUT_TAIL.length;
-   if ( columns < known )
+   var v = {};
+   for ( var i = 0; i < LAYOUT_TAIL.length; ++i )
+   {
+      var value = row[start + i];
+      if ( !isFiniteNumber( value ) )
+         return false;
+      v[LAYOUT_TAIL[i]] = value;
+   }
+   return v.stars >= 0 && v.stars < 1e7 && v.stars == Math.round( v.stars )
+       && v.median >= 0
+       && v.noise >= 0
+       && v.noiseRatio >= 0 && v.noiseRatio <= 1
+       && v.snrWeight >= 0
+       && v.starResidual >= 0
+       && v.fwhmMeanDev >= 0
+       && v.eccentricityMeanDev >= 0 && v.eccentricityMeanDev <= 1
+       && v.azimuth >= -360 && v.azimuth <= 360
+       && v.altitude >= -90 && v.altitude <= 90;
+}
+
+function layoutFor( row )
+{
+   if ( row.length < LAYOUT_HEAD.length + LAYOUT_TAIL.length )
+      return null;
+
+   var start = -1;
+   for ( var i = row.length - LAYOUT_TAIL.length; i >= LAYOUT_HEAD.length; --i )
+      if ( tailFitsAt( row, i ) )
+      {
+         start = i;
+         break;
+      }
+   if ( start < 0 )
       return null;
 
    var middle = [];
-   var extra = columns - known;
+   var extra = start - LAYOUT_HEAD.length;
    if ( extra == LAYOUT_MIDDLE_1_8_9.length )
       middle = LAYOUT_MIDDLE_1_8_9;
    else
-      for ( var i = 0; i < extra; ++i )
-         middle.push( "unknown" + i );
+      for ( var j = 0; j < extra; ++j )
+         middle.push( "unknown" + j );
 
-   return LAYOUT_HEAD.concat( middle ).concat( LAYOUT_TAIL );
+   var layout = LAYOUT_HEAD.concat( middle );
+   return layout.concat( LAYOUT_TAIL );
 }
 
 function rowToMeasurement( row )
@@ -238,10 +309,10 @@ function rowToMeasurement( row )
    for ( var k = 0; k < METRICS.length; ++k )
       m[METRICS[k].key] = NaN;
 
-   var layout = layoutFor( row.length );
+   var layout = layoutFor( row );
    if ( layout == null )
    {
-      // Shorter than anything known: only the leading fields can be trusted.
+      // The tail was not found: only the leading fields can be trusted.
       layout = LAYOUT_HEAD;
       m.partial = true;
    }
@@ -253,6 +324,7 @@ function rowToMeasurement( row )
       m.snrWeight = m.psfSNR;
 
    m.columns = row.length;
+   m.tailStart = layout.length - LAYOUT_TAIL.length;
 
    m.path = String( m.path );
    m.fileName = fileNameOf( m.path );
@@ -408,40 +480,34 @@ function newSubframeSelector( paths, roi )
    if ( !assigned )
       throw new Error( "The SubframeSelector process rejected the file list." );
 
-   P.subframeScale = settings.subframeScale;
-   P.cameraGain = settings.cameraGain;
-   P.scaleUnit = settings.scaleUnit;
-   P.dataUnit = settings.dataUnit;
-   P.structureLayers = settings.structureLayers;
-   P.noiseLayers = settings.noiseLayers;
-   P.applyHotPixelFilter = settings.hotPixelFilter;
-   P.fileCache = settings.fileCache;
-
-   // Only present in some versions.
-   try { P.pedestal = settings.pedestal; } catch ( x ) {}
-   try { P.nonInteractive = true; } catch ( x ) {}
-   try { P.outputDirectory = ""; } catch ( x ) {}
+   // Parameters come and go between versions of the process, and one that is
+   // not there must not take the whole measurement down with it.
+   setParameter( P, "subframeScale", settings.subframeScale );
+   setParameter( P, "cameraGain", settings.cameraGain );
+   setParameter( P, "scaleUnit", settings.scaleUnit );
+   setParameter( P, "dataUnit", settings.dataUnit );
+   setParameter( P, "structureLayers", settings.structureLayers );
+   setParameter( P, "noiseLayers", settings.noiseLayers );
+   setParameter( P, "applyHotPixelFilter", settings.hotPixelFilter );
+   setParameter( P, "fileCache", settings.fileCache );
+   setParameter( P, "pedestal", settings.pedestal );
+   setParameter( P, "nonInteractive", true );
+   setParameter( P, "outputDirectory", "" );
 
    // Fitting every star of a rich field is the slowest part of a measurement
    // and buys very little once there are a few hundred of them.
    if ( settings.maxPSFFits > 0 )
-      try { P.maxPSFFits = settings.maxPSFFits; } catch ( x ) {}
+      setParameter( P, "maxPSFFits", settings.maxPSFFits );
 
    // Measuring a central region instead of the whole frame is the single
    // biggest saving: the cost drops with the measured area.
    if ( roi != null )
-      try
-      {
-         P.roiX0 = roi.x0;
-         P.roiY0 = roi.y0;
-         P.roiX1 = roi.x1;
-         P.roiY1 = roi.y1;
-      }
-      catch ( x )
-      {
-         console.warningln( "This build of SubframeSelector has no region of " +
-                            "interest, the whole frame is measured." );
-      }
+      if ( !setParameter( P, "roiX0", roi.x0 ) ||
+           !setParameter( P, "roiY0", roi.y0 ) ||
+           !setParameter( P, "roiX1", roi.x1 ) ||
+           !setParameter( P, "roiY1", roi.y1 ) )
+         warnOnce( "roi", "This build of SubframeSelector has no region of " +
+                          "interest, the whole frame is measured." );
 
    return P;
 }
@@ -1507,14 +1573,14 @@ function SubframeCullerDialog()
             "available, the rest of the variables are not." );
       else if ( this.measurements.length > 0 )
       {
-         var columns = this.measurements[0].columns;
-         var extra = columns - LAYOUT_HEAD.length - LAYOUT_TAIL.length;
-         if ( extra != 0 && extra != LAYOUT_MIDDLE_1_8_9.length )
+         var first = this.measurements[0];
+         var extra = first.tailStart - LAYOUT_HEAD.length;
+         if ( extra != LAYOUT_MIDDLE_1_8_9.length )
             console.noteln( format(
                "The measurements table of this build has %d columns. Every " +
-               "variable this script filters by was read; %d columns in the " +
-               "middle of the table are not named here and were ignored.",
-               columns, extra ) );
+               "variable this script filters by was located; %d columns in " +
+               "the middle of the table are not named here and were ignored.",
+               first.columns, extra ) );
       }
 
       if ( failed.length > 0 )
