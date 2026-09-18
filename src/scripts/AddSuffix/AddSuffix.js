@@ -1,5 +1,5 @@
 /*
- * AddSuffix 1.0
+ * AddSuffix 1.1
  * Appends a suffix to the identifier of an image.
  *
  * Can be run from the Script menu, or saved as a process icon (new instance
@@ -16,7 +16,7 @@
 #include <pjsr/UndoFlag.jsh>
 
 #define TITLE   "AddSuffix"
-#define VERSION "1.0"
+#define VERSION "1.1"
 
 // ----------------------------------------------------------------------------
 // Persistent parameters - this is what gets stored in the icon
@@ -139,28 +139,48 @@ function AddSuffixDialog()
       this.dialog.newInstance();
    };
 
-   this.ok_Button = new PushButton( this );
-   this.ok_Button.text = "OK";
-   this.ok_Button.onClick = function()
+   this.apply_Button = new PushButton( this );
+   this.apply_Button.text = "Apply";
+   this.apply_Button.icon = this.scaledResource( ":/icons/execute.png" );
+   this.apply_Button.toolTip = "Apply to the active image. The window stays open.";
+   this.apply_Button.onClick = function()
    {
       parameters.suffix = this.dialog.suffix_Edit.text;
       parameters.duplicate = this.dialog.duplicate_Check.checked;
-      this.dialog.ok();
+
+      var w = ImageWindow.activeWindow;
+      if ( w.isNull )
+      {
+         ( new MessageBox( "There is no active image.",
+                           TITLE, StdIcon_Information, StdButton_Ok ) ).execute();
+         return;
+      }
+      try
+      {
+         applySuffix( w.mainView );
+      }
+      catch ( x )
+      {
+         ( new MessageBox( "" + x, TITLE, StdIcon_Error, StdButton_Ok ) ).execute();
+      }
    };
 
-   this.cancel_Button = new PushButton( this );
-   this.cancel_Button.text = "Cancel";
-   this.cancel_Button.onClick = function()
+   this.close_Button = new PushButton( this );
+   this.close_Button.text = "Close";
+   this.close_Button.icon = this.scaledResource( ":/icons/close.png" );
+   this.close_Button.onClick = function()
    {
-      this.dialog.cancel();
+      parameters.suffix = this.dialog.suffix_Edit.text;
+      parameters.duplicate = this.dialog.duplicate_Check.checked;
+      this.dialog.hide();
    };
 
    this.buttons_Sizer = new HorizontalSizer;
    this.buttons_Sizer.spacing = 6;
    this.buttons_Sizer.add( this.newInstance_Button );
    this.buttons_Sizer.addStretch();
-   this.buttons_Sizer.add( this.ok_Button );
-   this.buttons_Sizer.add( this.cancel_Button );
+   this.buttons_Sizer.add( this.apply_Button );
+   this.buttons_Sizer.add( this.close_Button );
 
    this.sizer = new VerticalSizer;
    this.sizer.margin = 8;
@@ -199,13 +219,16 @@ function main()
    // Run from the Script menu
    parameters.load();
 
+   // The dialog is shown as a modeless window, so PixInsight stays usable while
+   // it is open and the suffix can be applied to one image after another. The
+   // script has to stay alive for the window to exist, so the application event
+   // loop is pumped here until it is closed.
    var dialog = new AddSuffixDialog();
-   if ( dialog.execute() )
+   dialog.show();
+   while ( dialog.visible )
    {
-      var w = ImageWindow.activeWindow;
-      if ( w.isNull )
-         throw new Error( "There is no active image." );
-      applySuffix( w.mainView );
+      processEvents();
+      msleep( 20 );
    }
 }
 

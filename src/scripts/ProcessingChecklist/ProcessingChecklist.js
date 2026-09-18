@@ -32,7 +32,7 @@
 #include <pjsr/DataType.jsh>
 
 #define TITLE        "Processing Checklist"
-#define VERSION      "1.0.0"
+#define VERSION      "1.0.1"
 #define SETTINGS_KEY "ProcessingChecklist/data"
 
 // ----------------------------------------------------------------------------
@@ -824,7 +824,7 @@ function ChecklistDialog()
    this.close_Button.onClick = function()
    {
       self.commit();
-      self.ok();
+      self.hide();
    };
 
    this.bottomSizer = new HorizontalSizer;
@@ -863,7 +863,18 @@ ChecklistDialog.prototype = new Dialog;
 function main()
 {
    var dialog = new ChecklistDialog();
-   dialog.execute();
+
+   // The checklist is shown as a modeless window, so PixInsight stays fully
+   // usable while it is open. The script has to remain alive for the dialog to
+   // exist, so the application event loop is pumped here until it is closed.
+   dialog.show();
+   while ( dialog.visible )
+   {
+      processEvents();
+      msleep( 20 );
+   }
+
+   dialog.commit();
 }
 
 main();
