@@ -49,7 +49,7 @@
 #include <pjsr/NumericControl.jsh>
 
 #define TITLE        "Subframe Culler"
-#define VERSION      "1.5.0"
+#define VERSION      "1.5.1"
 #define SETTINGS_KEY "SubframeCuller/settings"
 
 #define COLOR_KEEP   0xff1e8f3e
@@ -590,7 +590,9 @@ function newSubframeSelector( paths, roi )
    setParameter( P, "dataUnit", settings.dataUnit );
    setParameter( P, "structureLayers", settings.structureLayers );
    setParameter( P, "noiseLayers", settings.noiseLayers );
-   setParameter( P, "applyHotPixelFilter", settings.hotPixelFilter );
+   // The process has no on/off switch for this one: the filter is a radius,
+   // and zero is what turns it off.
+   setParameter( P, "hotPixelFilterRadius", settings.hotPixelFilter ? 1 : 0 );
    setParameter( P, "fileCache", settings.fileCache );
    setParameter( P, "pedestal", settings.pedestal );
    setParameter( P, "nonInteractive", true );
