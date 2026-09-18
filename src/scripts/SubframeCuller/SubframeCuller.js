@@ -48,7 +48,7 @@
 #include <pjsr/NumericControl.jsh>
 
 #define TITLE        "Subframe Culler"
-#define VERSION      "1.3.0"
+#define VERSION      "1.3.1"
 #define SETTINGS_KEY "SubframeCuller/settings"
 
 #define COLOR_KEEP   0xff1e8f3e
@@ -162,6 +162,18 @@ function madSigma( values, med )
    for ( var j = 0; j < values.length; ++j )
       sum += (values[j] - med)*(values[j] - med);
    return Math.sqrt( sum/(values.length - 1) );
+}
+
+/*
+ * A number of seconds as something worth reading in a window title.
+ */
+function durationText( seconds )
+{
+   if ( seconds < 90 )
+      return format( "%d s", Math.round( seconds ) );
+   if ( seconds < 5400 )
+      return format( "%d min", Math.round( seconds/60 ) );
+   return format( "%.1f h", seconds/3600 );
 }
 
 function fileNameOf( path )
@@ -2037,11 +2049,24 @@ function SubframeCullerDialog()
          }
 
          var batch = paths.slice( first, first + batchSize );
-         this.windowTitle = format( "%s %s - measuring %d-%d of %d",
+
+         // The remaining time is estimated from the frames already measured,
+         // which is the only honest estimate: the cache makes some frames
+         // nearly free and the first batch is never representative.
+         var remaining = "";
+         if ( measured > 0 )
+         {
+            var perFrame = (Date.now() - startTime)/1000/measured;
+            remaining = format( ", %s left",
+                                durationText( perFrame*(paths.length - first) ) );
+         }
+         this.windowTitle = format( "%s %s - measuring %d-%d of %d%s",
                                     TITLE, VERSION, first + 1,
-                                    first + batch.length, paths.length );
+                                    first + batch.length, paths.length,
+                                    remaining );
          processEvents();
 
+         var batchStart = Date.now();
          var rows = [];
          try
          {
@@ -2075,8 +2100,11 @@ function SubframeCullerDialog()
             ++measured;
          }
 
-         console.writeln( format( "   %d/%d frames measured.",
-                                  measured, paths.length ) );
+         var batchSeconds = (Date.now() - batchStart)/1000;
+         console.writeln( format( "   %d/%d frames measured, %.1f s for this " +
+                                  "batch (%.2f s/frame).",
+                                  measured, paths.length, batchSeconds,
+                                  batchSeconds/batch.length ) );
       }
 
       this.windowTitle = TITLE + " " + VERSION;
