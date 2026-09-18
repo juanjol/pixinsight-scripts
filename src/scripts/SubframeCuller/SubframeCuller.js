@@ -16,8 +16,10 @@
  *    kept, red for the ones that are rejected, and the statistics of the
  *    selection are updated as the limits change.
  *  - Individual frames can be pinned so that the filters never touch them,
- *    and double clicking one opens it in PixInsight with the automatic
- *    screen stretch applied.
+ *    and double clicking one draws it, stretched, in the pane of the dialog,
+ *    which can be panned and zoomed. PixInsight disables its workspace while
+ *    a script runs, so a frame opened as an image window cannot be looked at
+ *    until the script ends; the pane belongs to the dialog and answers.
  *  - Accepting the selection moves the rejected frames to a subfolder and,
  *    optionally, writes a CSV file with every measurement. The accepted
  *    frames can also be gathered in a subfolder of their own, which is the
@@ -46,7 +48,7 @@
 #include <pjsr/NumericControl.jsh>
 
 #define TITLE        "Subframe Culler"
-#define VERSION      "1.2.1"
+#define VERSION      "1.3.0"
 #define SETTINGS_KEY "SubframeCuller/settings"
 
 #define COLOR_KEEP   0xff1e8f3e
@@ -427,6 +429,7 @@ function defaultSettings()
       writeCSV:       true,
       previewStretch: true,
       closePreview:   true,
+      followSelection: false,
       criteria:       defaultCriteria()
    };
 }
@@ -716,6 +719,215 @@ function applyAutoSTF( view )
                        " The preview of a linear frame will look black." );
    }
 }
+
+/*
+ * Renders a frame into a bitmap that the dialog can paint.
+ *
+ * PixInsight disables its workspace while a script is running, so a frame
+ * opened as an image window cannot be panned or zoomed until the script ends.
+ * A bitmap drawn inside the dialog belongs to the dialog, and the dialog is
+ * the one thing that does answer.
+ *
+ * The frame is opened, stretched, rendered and closed again. The stretch is a
+ * real histogram transformation rather than a screen transfer function because
+ * what is rendered is pixel data; the window it is applied to is a throwaway
+ * copy that never reaches the workspace.
+ */
+function renderFrame( path, stretch, maxDimension )
+{
+   var windows = ImageWindow.open( path, "SubframeCullerPreview" );
+   if ( windows == null || windows.length == 0 )
+      throw new Error( "the file could not be opened" );
+
+   var window = windows[0];
+   try
+   {
+      var view = window.mainView;
+
+      if ( stretch )
+         try
+         {
+            var image = view.image;
+            var median = image.median();
+            var mad = image.MAD( median )*1.4826;
+            var c0 = (mad > 0) ? Math.min( 1, Math.max( 0, median - 2.8*mad ) ) : 0;
+            var m = midtonesTransfer( 0.25, median - c0 );
+
+            // Each row is [ c0, m, c1, r0, r1 ]; the fourth is the combined
+            // RGB/K channel, which is the one that stretches every channel.
+            var neutral = [ 0, 0.5, 1, 0, 1 ];
+            var H = new HistogramTransformation;
+            H.H = [ neutral, neutral, neutral, [ c0, m, 1, 0, 1 ], neutral ];
+            H.executeOn( view, false/*swapFile*/ );
+         }
+         catch ( x )
+         {
+            warnOnce( "stretch", "The preview could not be stretched: " + x );
+         }
+
+      var bitmap = view.image.render();
+
+      // A full sized bitmap of a modern sensor is tens of megabytes and the
+      // pane is a few hundred pixels wide, so it is reduced once, here, rather
+      // than on every repaint.
+      var largest = Math.max( bitmap.width, bitmap.height );
+      if ( maxDimension > 0 && largest > maxDimension )
+      {
+         var factor = maxDimension/largest;
+         bitmap = bitmap.scaledTo( Math.round( bitmap.width*factor ),
+                                   Math.round( bitmap.height*factor ) );
+      }
+      return bitmap;
+   }
+   finally
+   {
+      try { window.forceClose(); } catch ( x ) {}
+   }
+}
+
+// ----------------------------------------------------------------------------
+// The preview pane
+// ----------------------------------------------------------------------------
+
+function FramePreview( parent )
+{
+   this.__base__ = Control;
+   this.__base__( parent );
+
+   var self = this;
+
+   this.bitmap = null;
+   this.message = "Double click a frame to see it here.";
+   this.scale = 0;          // zero means fit to the pane
+   this.centerX = 0;        // centre of the view, in bitmap coordinates
+   this.centerY = 0;
+   this.dragging = false;
+   this.dragX = 0;
+   this.dragY = 0;
+
+   this.backgroundColor = 0xff101010;
+   this.setScaledMinSize( 320, 260 );
+   this.toolTip = "<p>Drag to pan, wheel to zoom, double click to fit.</p>";
+
+   this.fitScale = function()
+   {
+      if ( this.bitmap == null || this.bitmap.width < 1 || this.bitmap.height < 1 )
+         return 1;
+      return Math.min( this.width/this.bitmap.width,
+                       this.height/this.bitmap.height );
+   };
+
+   this.currentScale = function()
+   {
+      return (this.scale > 0) ? this.scale : this.fitScale();
+   };
+
+   this.setBitmap = function( bitmap, message )
+   {
+      this.bitmap = bitmap;
+      this.message = message;
+      this.scale = 0;
+      if ( bitmap != null )
+      {
+         this.centerX = bitmap.width/2;
+         this.centerY = bitmap.height/2;
+      }
+      this.update();
+   };
+
+   this.fit = function()
+   {
+      this.scale = 0;
+      if ( this.bitmap != null )
+      {
+         this.centerX = this.bitmap.width/2;
+         this.centerY = this.bitmap.height/2;
+      }
+      this.update();
+   };
+
+   this.zoomBy = function( factor )
+   {
+      if ( this.bitmap == null )
+         return;
+      var s = this.currentScale()*factor;
+      this.scale = Math.min( 8, Math.max( 0.02, s ) );
+      this.update();
+   };
+
+   this.onPaint = function()
+   {
+      var g = new Graphics( this );
+      try
+      {
+         g.fillRect( 0, 0, this.width, this.height, new Brush( 0xff101010 ) );
+
+         if ( this.bitmap != null )
+         {
+            var s = this.currentScale();
+            var w = this.bitmap.width*s;
+            var h = this.bitmap.height*s;
+            var x0 = this.width/2 - this.centerX*s;
+            var y0 = this.height/2 - this.centerY*s;
+            g.drawScaledBitmap( new Rect( Math.round( x0 ), Math.round( y0 ),
+                                          Math.round( x0 + w ),
+                                          Math.round( y0 + h ) ),
+                                this.bitmap );
+         }
+
+         if ( this.message.length > 0 )
+         {
+            g.pen = new Pen( 0xffe0e0e0 );
+            g.drawText( 8, this.height - 8, this.message );
+         }
+      }
+      finally
+      {
+         g.end();
+      }
+   };
+
+   this.onMousePress = function( x, y, button, buttons, modifiers )
+   {
+      self.dragging = true;
+      self.dragX = x;
+      self.dragY = y;
+   };
+
+   this.onMouseMove = function( x, y, buttons, modifiers )
+   {
+      if ( !self.dragging || self.bitmap == null )
+         return;
+      var s = self.currentScale();
+      self.centerX -= (x - self.dragX)/s;
+      self.centerY -= (y - self.dragY)/s;
+      self.dragX = x;
+      self.dragY = y;
+      self.update();
+   };
+
+   this.onMouseRelease = function( x, y, button, buttons, modifiers )
+   {
+      self.dragging = false;
+   };
+
+   this.onMouseWheel = function( x, y, delta, buttons, modifiers )
+   {
+      self.zoomBy( (delta > 0) ? 1.25 : 1/1.25 );
+   };
+
+   this.onMouseDoubleClick = function( x, y, buttons, modifiers )
+   {
+      self.fit();
+   };
+
+   this.onResize = function()
+   {
+      this.update();
+   };
+}
+
+FramePreview.prototype = new Control;
 
 // ----------------------------------------------------------------------------
 // Filtering
@@ -1036,6 +1248,8 @@ function SubframeCullerDialog()
    this.aborted = false;
    this.measuring = false;
    this.previewWindows = [];
+   this.loadingPreview = false;
+   this.rebuilding = false;
 
    // --- Input folder ---------------------------------------------------------
 
@@ -1407,7 +1621,18 @@ function SubframeCullerDialog()
    this.tree.setHeaderText( this.tree.numberOfColumns - 1, "Status" );
    this.tree.onNodeDoubleClicked = function( node )
    {
-      self.openPreview( node.measurement );
+      self.showInPane( node.measurement );
+   };
+
+   this.tree.onNodeSelectionUpdated = function()
+   {
+      // Rebuilding the list restores the selection, and that must not send the
+      // pane back to disk on every move of a criterion.
+      if ( !settings.followSelection || self.rebuilding )
+         return;
+      var nodes = self.tree.selectedNodes;
+      if ( nodes != null && nodes.length == 1 )
+         self.showInPane( nodes[0].measurement );
    };
 
    this.pin_Button = new PushButton( this );
@@ -1462,8 +1687,10 @@ function SubframeCullerDialog()
    this.open_Button = new PushButton( this );
    this.open_Button.text = "Open";
    this.open_Button.toolTip =
-      "<p>Opens the selected frame in PixInsight. Double clicking a row does " +
-      "the same.</p>";
+      "<p>Opens the selected frame as an image window in PixInsight.</p>" +
+      "<p>PixInsight disables its workspace while a script is running, so " +
+      "that window cannot be panned or zoomed until this one is closed. To " +
+      "look at a frame now, use the pane on the right: double click a row.</p>";
    this.open_Button.onClick = function()
    {
       var nodes = self.tree.selectedNodes;
@@ -1475,9 +1702,9 @@ function SubframeCullerDialog()
    this.stretch_Check.text = "Autostretch";
    this.stretch_Check.checked = settings.previewStretch;
    this.stretch_Check.toolTip =
-      "<p>Applies the automatic screen stretch to the frames opened from " +
-      "here. A light frame is linear, so without it the preview looks " +
-      "black.</p>";
+      "<p>Stretches what is shown, both in the pane and in the frames opened " +
+      "as image windows. A light frame is linear, so without it a preview is " +
+      "a black rectangle.</p>";
    this.stretch_Check.onCheck = function( checked )
    {
       settings.previewStretch = checked;
@@ -1508,12 +1735,69 @@ function SubframeCullerDialog()
    this.listButtons_Sizer.add( this.sort_Label );
    this.listButtons_Sizer.add( this.sort_Combo );
 
+   this.preview = new FramePreview( this );
+
+   this.fit_Button = new PushButton( this );
+   this.fit_Button.text = "Fit";
+   this.fit_Button.toolTip = "Fit the frame in the pane.";
+   this.fit_Button.onClick = function()
+   {
+      self.preview.fit();
+   };
+
+   this.zoomIn_Button = new PushButton( this );
+   this.zoomIn_Button.text = "+";
+   this.zoomIn_Button.setScaledFixedWidth( 32 );
+   this.zoomIn_Button.onClick = function()
+   {
+      self.preview.zoomBy( 1.25 );
+   };
+
+   this.zoomOut_Button = new PushButton( this );
+   this.zoomOut_Button.text = "-";
+   this.zoomOut_Button.setScaledFixedWidth( 32 );
+   this.zoomOut_Button.onClick = function()
+   {
+      self.preview.zoomBy( 1/1.25 );
+   };
+
+   this.followSelection_Check = new CheckBox( this );
+   this.followSelection_Check.text = "Follow selection";
+   this.followSelection_Check.checked = settings.followSelection;
+   this.followSelection_Check.toolTip =
+      "<p>Loads the selected frame in the pane as the selection moves, so a " +
+      "folder can be reviewed with the arrow keys. Every frame has to be read " +
+      "from disk, which is why this is off by default.</p>";
+   this.followSelection_Check.onCheck = function( checked )
+   {
+      settings.followSelection = checked;
+   };
+
+   this.previewButtons_Sizer = new HorizontalSizer;
+   this.previewButtons_Sizer.spacing = 4;
+   this.previewButtons_Sizer.add( this.fit_Button );
+   this.previewButtons_Sizer.add( this.zoomOut_Button );
+   this.previewButtons_Sizer.add( this.zoomIn_Button );
+   this.previewButtons_Sizer.addSpacing( 8 );
+   this.previewButtons_Sizer.add( this.followSelection_Check );
+   this.previewButtons_Sizer.addStretch();
+
+   this.preview_Sizer = new VerticalSizer;
+   this.preview_Sizer.spacing = 4;
+   this.preview_Sizer.add( this.preview, 100 );
+   this.preview_Sizer.add( this.previewButtons_Sizer );
+
+   this.listAndPreview_Sizer = new HorizontalSizer;
+   this.listAndPreview_Sizer.spacing = 6;
+   this.listAndPreview_Sizer.add( this.tree, 100 );
+   this.listAndPreview_Sizer.add( this.preview_Sizer, 55 );
+
    this.list_Group = new GroupBox( this );
    this.list_Group.title = "Frames";
    this.list_Group.sizer = new VerticalSizer;
    this.list_Group.sizer.margin = 6;
    this.list_Group.sizer.spacing = 4;
-   this.list_Group.sizer.add( this.tree, 100 );
+   this.list_Group.sizer.add( this.listAndPreview_Sizer, 100 );
    this.list_Group.sizer.add( this.listButtons_Sizer );
 
    // --- Statistics -----------------------------------------------------------
@@ -1668,7 +1952,7 @@ function SubframeCullerDialog()
    this.sizer.add( this.buttons_Sizer );
 
    this.adjustToContents();
-   this.setScaledMinSize( 900, 700 );
+   this.setScaledMinSize( 1240, 760 );
 
    // --------------------------------------------------------------------------
    // Behaviour
@@ -1849,6 +2133,7 @@ function SubframeCullerDialog()
       this.updateStatistics();
    };
 
+
    this.sortedMeasurements = function()
    {
       var list = this.measurements.slice();
@@ -1879,6 +2164,7 @@ function SubframeCullerDialog()
 
    this.rebuildTree = function()
    {
+      this.rebuilding = true;
       var selected = {};
       for ( var s = 0; s < this.tree.numberOfChildren; ++s )
          if ( this.tree.child( s ).selected )
@@ -1921,6 +2207,8 @@ function SubframeCullerDialog()
 
       for ( var w = 0; w < this.tree.numberOfColumns; ++w )
          this.tree.adjustColumnWidthToContents( w );
+
+      this.rebuilding = false;
    };
 
    this.updateStatistics = function()
@@ -2009,6 +2297,55 @@ function SubframeCullerDialog()
          m.pinnedKeep = keep;
       }
       this.refresh();
+   };
+
+   /*
+    * Loads a frame into the pane of the dialog. This is the one way of looking
+    * at a frame that works while the script is running, since the pane belongs
+    * to the dialog.
+    */
+   this.showInPane = function( m )
+   {
+      if ( m == null || m.path.length == 0 )
+         return;
+      if ( !File.exists( m.path ) )
+      {
+         this.preview.setBitmap( null, m.fileName + ": the file is no longer there" );
+         return;
+      }
+      if ( this.loadingPreview )
+         return;
+
+      this.loadingPreview = true;
+      this.preview.setBitmap( this.preview.bitmap, "Reading " + m.fileName + "..." );
+      processEvents();
+
+      try
+      {
+         var bitmap = renderFrame( m.path, settings.previewStretch, 2000 );
+         this.preview.setBitmap( bitmap, this.captionOf( m ) );
+      }
+      catch ( x )
+      {
+         this.preview.setBitmap( null, m.fileName + ": " + x );
+         console.criticalln( m.fileName + ": " + x );
+      }
+      finally
+      {
+         this.loadingPreview = false;
+      }
+   };
+
+   this.captionOf = function( m )
+   {
+      var text = m.fileName;
+      var fwhm = metricByKey( "fwhm" ), ecc = metricByKey( "eccentricity" );
+      if ( isFiniteNumber( m.fwhm ) )
+         text += format( "   FWHM %.*f", fwhm.precision, m.fwhm );
+      if ( isFiniteNumber( m.eccentricity ) )
+         text += format( "   Ecc %.*f", ecc.precision, m.eccentricity );
+      text += m.keep ? "   keep" : "   reject";
+      return text;
    };
 
    /*
