@@ -27,8 +27,11 @@ and lets you cull them interactively. Each variable can filter with absolute
 limits or with a k-sigma clip around the median of the batch, the file list is
 coloured green or red in real time, and the panel shows how many frames survive
 and how the median quality improves. Frames can be pinned so the filters never
-touch them. Accepting moves the rejected files to a `rejects` subfolder and
-writes a CSV with every measurement.
+touch them, and double clicking one opens it in PixInsight with the automatic
+screen stretch applied. Accepting moves the rejected files to a `rejects`
+subfolder and writes a CSV with every measurement; the accepted frames can also
+be gathered in an `accepted` subfolder, which is the folder to add as lights in
+WBPP.
 
 Measurement speed is tunable: frames are measured in batches so that
 SubframeSelector spreads them over every core, the number of PSF fits per frame

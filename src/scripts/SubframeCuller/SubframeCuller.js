@@ -15,9 +15,13 @@
  *  - The file list is coloured in real time: green for the frames that are
  *    kept, red for the ones that are rejected, and the statistics of the
  *    selection are updated as the limits change.
- *  - Individual frames can be pinned so that the filters never touch them.
+ *  - Individual frames can be pinned so that the filters never touch them,
+ *    and double clicking one opens it in PixInsight with the automatic
+ *    screen stretch applied.
  *  - Accepting the selection moves the rejected frames to a subfolder and,
- *    optionally, writes a CSV file with every measurement.
+ *    optionally, writes a CSV file with every measurement. The accepted
+ *    frames can also be gathered in a subfolder of their own, which is the
+ *    folder to hand to WBPP.
  *
  * Requires PixInsight 1.8.8 or later.
  *
@@ -42,7 +46,7 @@
 #include <pjsr/NumericControl.jsh>
 
 #define TITLE        "Subframe Culler"
-#define VERSION      "1.1.2"
+#define VERSION      "1.2.0"
 #define SETTINGS_KEY "SubframeCuller/settings"
 
 #define COLOR_KEEP   0xff1e8f3e
@@ -380,7 +384,11 @@ function defaultSettings()
       useROI:         false,
       roiPercent:     50,       // side of the central region, per cent
       rejectsFolder:  "rejects",
+      acceptedFolder: "accepted",
+      acceptedMode:   "copy",    // "copy" or "move"
       writeCSV:       true,
+      previewStretch: true,
+      closePreview:   true,
       criteria:       defaultCriteria()
    };
 }
@@ -582,6 +590,63 @@ function measureBatch( paths, roi )
       result.push( m );
    }
    return result;
+}
+
+/*
+ * File.move only works within one device, so the general call is used and the
+ * fast one kept as a fallback for builds that lack it.
+ */
+function transferFile( sourcePath, targetPath, move )
+{
+   if ( move )
+   {
+      try
+      {
+         File.moveFile( targetPath, sourcePath );
+         return;
+      }
+      catch ( x )
+      {
+         File.move( sourcePath, targetPath );
+         return;
+      }
+   }
+   File.copyFile( targetPath, sourcePath );
+}
+
+// ----------------------------------------------------------------------------
+// Previewing a frame
+// ----------------------------------------------------------------------------
+
+/*
+ * The screen transfer function PixInsight applies with its automatic stretch.
+ * A light frame is linear, so without it the preview is a black rectangle.
+ */
+function applyAutoSTF( view )
+{
+   var shadowsClipping = -2.8;   // in MAD units from the median
+   var targetBackground = 0.25;
+
+   try
+   {
+      var image = view.image;
+      var median = image.median();
+      var mad = image.MAD( median )*1.4826;
+
+      var c0 = (mad > 0) ? Math.min( 1, Math.max( 0, median + shadowsClipping*mad ) )
+                         : 0;
+      var m = mtf( targetBackground, median - c0 );
+      var stretch = [ c0, 1, m, 0, 1 ];
+
+      var P = new ScreenTransferFunction;
+      P.STF = [ stretch, stretch, stretch, [ 0, 1, 0.5, 0, 1 ] ];
+      P.executeOn( view );
+   }
+   catch ( x )
+   {
+      warnOnce( "stf", "The automatic stretch could not be applied to the " +
+                       "preview: " + x );
+   }
 }
 
 // ----------------------------------------------------------------------------
@@ -902,6 +967,7 @@ function SubframeCullerDialog()
    this.limits = {};
    this.aborted = false;
    this.measuring = false;
+   this.previewWindows = [];
 
    // --- Input folder ---------------------------------------------------------
 
@@ -1273,15 +1339,14 @@ function SubframeCullerDialog()
    this.tree.setHeaderText( this.tree.numberOfColumns - 1, "Status" );
    this.tree.onNodeDoubleClicked = function( node )
    {
-      self.togglePin( [ node ] );
+      self.openPreview( node.measurement );
    };
 
    this.pin_Button = new PushButton( this );
    this.pin_Button.text = "Pin / unpin";
    this.pin_Button.toolTip =
       "<p>Pins the selected frames to their current state, so the filters no " +
-      "longer change them. Pinning again releases them. Double clicking a row " +
-      "does the same.</p>";
+      "longer change them. Pinning again releases them.</p>";
    this.pin_Button.onClick = function()
    {
       self.togglePin( self.tree.selectedNodes );
@@ -1326,8 +1391,47 @@ function SubframeCullerDialog()
       self.rebuildTree();
    };
 
+   this.open_Button = new PushButton( this );
+   this.open_Button.text = "Open";
+   this.open_Button.toolTip =
+      "<p>Opens the selected frame in PixInsight. Double clicking a row does " +
+      "the same.</p>";
+   this.open_Button.onClick = function()
+   {
+      var nodes = self.tree.selectedNodes;
+      if ( nodes != null && nodes.length > 0 )
+         self.openPreview( nodes[0].measurement );
+   };
+
+   this.stretch_Check = new CheckBox( this );
+   this.stretch_Check.text = "Autostretch";
+   this.stretch_Check.checked = settings.previewStretch;
+   this.stretch_Check.toolTip =
+      "<p>Applies the automatic screen stretch to the frames opened from " +
+      "here. A light frame is linear, so without it the preview looks " +
+      "black.</p>";
+   this.stretch_Check.onCheck = function( checked )
+   {
+      settings.previewStretch = checked;
+   };
+
+   this.closePreview_Check = new CheckBox( this );
+   this.closePreview_Check.text = "One at a time";
+   this.closePreview_Check.checked = settings.closePreview;
+   this.closePreview_Check.toolTip =
+      "<p>Closes the frame opened from here before opening the next one, so " +
+      "reviewing a folder does not fill PixInsight with windows.</p>";
+   this.closePreview_Check.onCheck = function( checked )
+   {
+      settings.closePreview = checked;
+   };
+
    this.listButtons_Sizer = new HorizontalSizer;
    this.listButtons_Sizer.spacing = 6;
+   this.listButtons_Sizer.add( this.open_Button );
+   this.listButtons_Sizer.add( this.stretch_Check );
+   this.listButtons_Sizer.add( this.closePreview_Check );
+   this.listButtons_Sizer.addSpacing( 12 );
    this.listButtons_Sizer.add( this.pin_Button );
    this.listButtons_Sizer.add( this.forceKeep_Button );
    this.listButtons_Sizer.add( this.forceReject_Button );
@@ -1398,6 +1502,63 @@ function SubframeCullerDialog()
    this.output_Sizer.add( this.csv_Check );
    this.output_Sizer.addStretch();
 
+   this.accepted_Label = new Label( this );
+   this.accepted_Label.text = "Accepted subfolder:";
+   this.accepted_Label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
+
+   this.accepted_Edit = new Edit( this );
+   this.accepted_Edit.text = settings.acceptedFolder;
+   this.accepted_Edit.setScaledFixedWidth( 160 );
+   this.accepted_Edit.toolTip =
+      "Subfolder where the accepted frames are gathered, ready to be handed " +
+      "to WBPP.";
+   this.accepted_Edit.onEditCompleted = function()
+   {
+      var name = this.text.trim();
+      if ( name.length == 0 )
+      {
+         name = "accepted";
+         this.text = name;
+      }
+      settings.acceptedFolder = name;
+   };
+
+   this.acceptedMode_Combo = new ComboBox( this );
+   this.acceptedMode_Combo.addItem( "copy" );
+   this.acceptedMode_Combo.addItem( "move" );
+   this.acceptedMode_Combo.currentItem = (settings.acceptedMode == "move") ? 1 : 0;
+   this.acceptedMode_Combo.setScaledFixedWidth( 80 );
+   this.acceptedMode_Combo.toolTip =
+      "<p>Copying leaves the originals untouched but needs the disk space " +
+      "again; moving does not, and leaves the source folder holding the " +
+      "rejected frames alone.</p>";
+   this.acceptedMode_Combo.onItemSelected = function( item )
+   {
+      settings.acceptedMode = (item == 1) ? "move" : "copy";
+   };
+
+   this.gather_Button = new PushButton( this );
+   this.gather_Button.text = "Gather accepted";
+   this.gather_Button.toolTip =
+      "<p>Gathers the accepted frames in the subfolder above, which is then " +
+      "the folder to add as lights in WBPP.</p>" +
+      "<p>Nothing can hand a file list to WBPP: it is a script, and one " +
+      "script cannot drive another. Pointing it at a folder holding only the " +
+      "frames that survived is as close as this gets.</p>";
+   this.gather_Button.onClick = function()
+   {
+      self.gatherAccepted();
+   };
+
+   this.accepted_Sizer = new HorizontalSizer;
+   this.accepted_Sizer.spacing = 6;
+   this.accepted_Sizer.add( this.accepted_Label );
+   this.accepted_Sizer.add( this.accepted_Edit );
+   this.accepted_Sizer.add( this.acceptedMode_Combo );
+   this.accepted_Sizer.addSpacing( 8 );
+   this.accepted_Sizer.add( this.gather_Button );
+   this.accepted_Sizer.addStretch();
+
    // --- Dialog buttons -------------------------------------------------------
 
    this.apply_Button = new PushButton( this );
@@ -1416,6 +1577,7 @@ function SubframeCullerDialog()
    this.close_Button.onClick = function()
    {
       saveSettings( settings );
+      self.closePreviews();
       self.hide();
    };
 
@@ -1434,6 +1596,7 @@ function SubframeCullerDialog()
    this.sizer.add( this.list_Group, 100 );
    this.sizer.add( this.stats_Group );
    this.sizer.add( this.output_Sizer );
+   this.sizer.add( this.accepted_Sizer );
    this.sizer.add( this.buttons_Sizer );
 
    this.adjustToContents();
@@ -1779,6 +1942,148 @@ function SubframeCullerDialog()
       this.refresh();
    };
 
+   /*
+    * Opens a frame in PixInsight. Reviewing a folder this way would pile up
+    * windows, so by default the previously opened frame is closed first.
+    */
+   this.openPreview = function( m )
+   {
+      if ( m == null || m.path.length == 0 )
+         return;
+
+      if ( !File.exists( m.path ) )
+      {
+         ( new MessageBox( "The file is no longer there:\n" + m.path,
+                           TITLE, StdIcon_Warning, StdButton_Ok ) ).execute();
+         return;
+      }
+
+      if ( settings.closePreview )
+         this.closePreviews();
+
+      try
+      {
+         var windows = ImageWindow.open( m.path );
+         if ( windows == null || windows.length == 0 )
+            throw new Error( "the file could not be opened" );
+
+         for ( var i = 0; i < windows.length; ++i )
+         {
+            var w = windows[i];
+            if ( settings.previewStretch )
+               applyAutoSTF( w.mainView );
+            w.show();
+            w.zoomToFit( false );
+            this.previewWindows.push( w );
+         }
+         windows[0].bringToFront();
+      }
+      catch ( x )
+      {
+         ( new MessageBox( m.fileName + ": " + x,
+                           TITLE, StdIcon_Error, StdButton_Ok ) ).execute();
+      }
+   };
+
+   this.closePreviews = function()
+   {
+      for ( var i = 0; i < this.previewWindows.length; ++i )
+         try
+         {
+            var w = this.previewWindows[i];
+            if ( w != null && !w.isNull )
+               w.forceClose();
+         }
+         catch ( x )
+         {
+         }
+      this.previewWindows = [];
+   };
+
+   /*
+    * WBPP is a script, and a script cannot be driven from another script: no
+    * call, no parameter and no settings key can hand it a list of files. What
+    * is left is to leave the accepted frames alone in a folder, which is what
+    * WBPP takes in one drop.
+    */
+   this.gatherAccepted = function()
+   {
+      if ( this.measurements.length == 0 )
+      {
+         ( new MessageBox( "Measure a folder first.",
+                           TITLE, StdIcon_Information, StdButton_Ok ) ).execute();
+         return;
+      }
+
+      var accepted = [];
+      for ( var i = 0; i < this.measurements.length; ++i )
+         if ( this.measurements[i].keep )
+            accepted.push( this.measurements[i] );
+
+      if ( accepted.length == 0 )
+      {
+         ( new MessageBox( "No frame is being accepted.",
+                           TITLE, StdIcon_Information, StdButton_Ok ) ).execute();
+         return;
+      }
+
+      var folder = settings.acceptedFolder;
+      var move = settings.acceptedMode == "move";
+      var question = format(
+         "%d of %d frames are going to be %s the \"%s\" subfolder.\n\n" +
+         "Continue?", accepted.length, this.measurements.length,
+         move ? "moved to" : "copied to", folder );
+      var box = new MessageBox( question, TITLE, StdIcon_Question,
+                                StdButton_Yes, StdButton_No );
+      if ( box.execute() != StdButton_Yes )
+         return;
+
+      var done = 0;
+      var target = "";
+      var failures = [];
+      for ( var j = 0; j < accepted.length; ++j )
+      {
+         var m = accepted[j];
+         target = directoryOf( m.path ) + '/' + folder;
+         try
+         {
+            if ( !File.directoryExists( target ) )
+               File.createDirectory( target, true );
+
+            var destination = target + '/' + m.fileName;
+            if ( File.exists( destination ) )
+            {
+               failures.push( m.fileName + ": already in the accepted folder" );
+               continue;
+            }
+            transferFile( m.path, destination, move );
+            if ( move )
+               m.path = destination;
+            ++done;
+         }
+         catch ( x )
+         {
+            failures.push( m.fileName + ": " + x );
+         }
+      }
+
+      console.noteln( format( "%d frames %s \"%s\".", done,
+                              move ? "moved to" : "copied to", folder ) );
+      for ( var f = 0; f < failures.length; ++f )
+         console.criticalln( failures[f] );
+
+      saveSettings( settings );
+
+      var report = format( "%d frames %s:\n%s\n\nAdd that folder as lights " +
+                           "in WBPP.", done, move ? "moved to" : "copied to",
+                           target );
+      if ( failures.length > 0 )
+         report += format( "\n\n%d could not be transferred, see the console.",
+                           failures.length );
+      ( new MessageBox( report, TITLE, StdIcon_Information,
+                        StdButton_Ok ) ).execute();
+   };
+
    this.writeCSVFile = function( directory )
    {
       var columns = [ "file", "status" ];
@@ -1858,7 +2163,7 @@ function SubframeCullerDialog()
                failures.push( m.fileName + ": already in the rejects folder" );
                continue;
             }
-            File.move( m.path, destination );
+            transferFile( m.path, destination, true );
             m.path = destination;
             m.moved = true;
             ++moved;
