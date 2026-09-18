@@ -14,7 +14,8 @@
  *    limits or with a k-sigma clip around the robust median of the batch.
  *  - The file list is coloured in real time: green for the frames that are
  *    kept, red for the ones that are rejected, and the statistics of the
- *    selection are updated as the limits change.
+ *    selection are updated as the limits change. It has one column per
+ *    measured variable and clicking a header orders the list by it.
  *  - Individual frames can be pinned so that the filters never touch them,
  *    and double clicking one draws it, stretched, in the pane of the dialog,
  *    which can be panned and zoomed. PixInsight disables its workspace while
@@ -48,7 +49,7 @@
 #include <pjsr/NumericControl.jsh>
 
 #define TITLE        "Subframe Culler"
-#define VERSION      "1.4.0"
+#define VERSION      "1.5.0"
 #define SETTINGS_KEY "SubframeCuller/settings"
 
 #define COLOR_KEEP   0xff1e8f3e
@@ -193,6 +194,27 @@ function fmt( value, precision )
    return isFiniteNumber( value ) ? format( "%.*f", precision, value ) : "-";
 }
 
+/*
+ * Pads a number on the left up to a width.
+ *
+ * The TreeBox orders a column by comparing its text, and only numbers written
+ * to the same width compare as numbers: without the padding 10.00 lands
+ * before 2.00. The padding is spaces in a right aligned column, so none of it
+ * is visible, and the width is that of the widest value of the column so that
+ * nothing is made wider than it has to be.
+ *
+ * The one thing this cannot express is a negative value, which then sorts
+ * after every positive one. None of the measured variables is negative on a
+ * light frame, altitude included, so that case is left where it falls rather
+ * than paid for with a zero in front of every number.
+ */
+function padLeft( text, width )
+{
+   while ( text.length < width )
+      text = " " + text;
+   return text;
+}
+
 // ----------------------------------------------------------------------------
 // Measured variables
 //
@@ -246,8 +268,11 @@ function metricByKey( key )
 }
 
 // Columns of the file list.
+// Every measured variable has one, so that the header can order the list by
+// any of them.
 var LIST_COLUMNS = [ "fwhm", "eccentricity", "snrWeight", "median", "noise",
-                     "stars", "starResidual", "altitude" ];
+                     "stars", "starResidual", "fwhmMeanDev",
+                     "eccentricityMeanDev", "altitude", "weight" ];
 
 // ----------------------------------------------------------------------------
 // The measurements table of SubframeSelector
@@ -1644,6 +1669,11 @@ function SubframeCullerDialog()
    this.tree = new TreeBox( this );
    this.tree.alternateRowColor = true;
    this.tree.headerVisible = true;
+
+   // Clicking a header orders the list by that column, and clicking the one
+   // already ordered turns it around. The TreeBox does this itself; it has no
+   // event for a header, so this is the only way to offer it.
+   this.tree.headerSorting = true;
    this.tree.multipleSelection = true;
    this.tree.rootDecoration = false;
    this.tree.setScaledMinSize( 700, 240 );
@@ -1708,19 +1738,6 @@ function SubframeCullerDialog()
       self.refresh();
    };
 
-   this.sort_Label = new Label( this );
-   this.sort_Label.text = "Sort by:";
-   this.sort_Label.textAlignment = TextAlign_Right | TextAlign_VertCenter;
-
-   this.sort_Combo = new ComboBox( this );
-   this.sort_Combo.addItem( "File name" );
-   for ( var s = 0; s < METRICS.length; ++s )
-      this.sort_Combo.addItem( METRICS[s].title );
-   this.sort_Combo.onItemSelected = function()
-   {
-      self.rebuildTree();
-   };
-
    this.open_Button = new PushButton( this );
    this.open_Button.text = "Open";
    this.open_Button.toolTip =
@@ -1769,8 +1786,6 @@ function SubframeCullerDialog()
    this.listButtons_Sizer.add( this.forceReject_Button );
    this.listButtons_Sizer.add( this.clearPins_Button );
    this.listButtons_Sizer.addStretch();
-   this.listButtons_Sizer.add( this.sort_Label );
-   this.listButtons_Sizer.add( this.sort_Combo );
 
    this.preview = new FramePreview( this );
 
@@ -2187,31 +2202,31 @@ function SubframeCullerDialog()
    };
 
 
+   /*
+    * The measurements in the order the list shows them, which is the order the
+    * header was last clicked into. The list itself is the only place that
+    * order lives, since the TreeBox sorts on its own and says nothing about
+    * it, so it is read back from there.
+    */
    this.sortedMeasurements = function()
    {
-      var list = this.measurements.slice();
-      var item = this.sort_Combo.currentItem;
-      if ( item == 0 )
-         list.sort( function( a, b )
-         {
-            return (a.fileName < b.fileName) ? -1 : ((a.fileName > b.fileName) ? 1 : 0);
-         } );
-      else
+      if ( this.tree.numberOfChildren == this.measurements.length )
       {
-         var key = METRICS[item - 1].key;
-         list.sort( function( a, b )
-         {
-            var va = a[key], vb = b[key];
-            var fa = isFiniteNumber( va ), fb = isFiniteNumber( vb );
-            if ( !fa && !fb )
-               return 0;
-            if ( !fa )
-               return 1;
-            if ( !fb )
-               return -1;
-            return va - vb;
-         } );
+         var shown = [];
+         for ( var i = 0; i < this.tree.numberOfChildren; ++i )
+            shown.push( this.tree.child( i ).measurement );
+         return shown;
       }
+      return this.measurementsByFileName();
+   };
+
+   this.measurementsByFileName = function()
+   {
+      var list = this.measurements.slice();
+      list.sort( function( a, b )
+      {
+         return (a.fileName < b.fileName) ? -1 : ((a.fileName > b.fileName) ? 1 : 0);
+      } );
       return list;
    };
 
@@ -2224,7 +2239,37 @@ function SubframeCullerDialog()
             selected[this.tree.child( s ).measurement.path] = true;
 
       this.tree.clear();
-      var list = this.sortedMeasurements();
+      var list = this.measurementsByFileName();
+
+      // Written out before any of it reaches the list, because every value of
+      // a column has to be padded to the same width for the header to order
+      // the column as numbers rather than as words.
+      var metrics = [];
+      for ( var c = 0; c < LIST_COLUMNS.length; ++c )
+         metrics.push( metricByKey( LIST_COLUMNS[c] ) );
+
+      var texts = [];
+      var widths = [];
+      for ( var i = 0; i < list.length; ++i )
+      {
+         var row = [];
+         for ( var c = 0; c < LIST_COLUMNS.length; ++c )
+         {
+            var text = fmt( list[i][metrics[c].key], metrics[c].precision );
+            row.push( text );
+            if ( text != "-" )
+               if ( widths[c] == null || text.length > widths[c] )
+                  widths[c] = text.length;
+         }
+         texts.push( row );
+      }
+
+      // One space more than the widest value, so that every number starts
+      // with a space and the bare dash of a frame with no value, which starts
+      // with something else, always ends up after all of them.
+      for ( var c = 0; c < LIST_COLUMNS.length; ++c )
+         widths[c] = (widths[c] == null) ? 0 : widths[c] + 1;
+
       for ( var i = 0; i < list.length; ++i )
       {
          var m = list[i];
@@ -2234,8 +2279,11 @@ function SubframeCullerDialog()
          node.setToolTip( 0, m.path );
          for ( var c = 0; c < LIST_COLUMNS.length; ++c )
          {
-            var metric = metricByKey( LIST_COLUMNS[c] );
-            node.setText( c + 1, fmt( m[metric.key], metric.precision ) );
+            // A frame with no value keeps its bare dash, which is how it ends
+            // up after every number instead of before them.
+            var text = texts[i][c];
+            node.setText( c + 1,
+                          (text == "-") ? text : padLeft( text, widths[c] ) );
             node.setAlignment( c + 1, TextAlign_Right | TextAlign_VertCenter );
          }
 

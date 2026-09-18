@@ -25,8 +25,9 @@ Loads a folder of lights, measures every frame with SubframeSelector (FWHM,
 eccentricity, SNR, background, noise, star count, star residual, altitude...)
 and lets you cull them interactively. Each variable can filter with absolute
 limits or with a k-sigma clip around the median of the batch, the file list is
-coloured green or red in real time, and the panel shows how many frames survive
-and how the median quality improves. Frames can be pinned so the filters never
+coloured green or red in real time, has one column per measured variable and is
+ordered by clicking a header, and the panel shows how many frames survive and
+how the median quality improves. Frames can be pinned so the filters never
 touch them, and double clicking one draws it, stretched, in the pane of the
 window, which pans and zooms with the mouse. PixInsight disables its workspace
 while any script is running, so a frame opened as an image window cannot be
