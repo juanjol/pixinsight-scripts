@@ -48,7 +48,7 @@
 #include <pjsr/NumericControl.jsh>
 
 #define TITLE        "Subframe Culler"
-#define VERSION      "1.3.1"
+#define VERSION      "1.4.0"
 #define SETTINGS_KEY "SubframeCuller/settings"
 
 #define COLOR_KEEP   0xff1e8f3e
@@ -418,7 +418,7 @@ function defaultCriteria()
 function defaultSettings()
 {
    return {
-      version:        1,
+      version:        2,
       inputDirectory: "",
       filter:         "*.xisf;*.fit;*.fits;*.fts",
       recursive:      false,
@@ -431,9 +431,9 @@ function defaultSettings()
       hotPixelFilter: true,
       pedestal:       0,
       fileCache:      true,
-      batchSize:      16,       // frames sent to SubframeSelector at once
-      maxPSFFits:     0,        // 0 leaves the default of the process
-      useROI:         false,
+      batchSize:      64,       // frames sent to SubframeSelector at once
+      maxPSFFits:     500,      // 0 leaves the default of the process
+      useROI:         true,
       roiPercent:     50,       // side of the central region, per cent
       rejectsFolder:  "rejects",
       acceptedFolder: "accepted",
@@ -455,8 +455,24 @@ function loadSettings()
       if ( Settings.lastReadOK && json != null && json.length > 0 )
       {
          var stored = JSON.parse( json );
+
+         // Settings saved before version 2 carry the speed defaults of a time
+         // when a measurement went over the whole frame, fitted every star
+         // and was handed over in small batches. They are the difference
+         // between minutes and tens of minutes on a folder of a night, so
+         // they are taken from the defaults rather than from the file.
+         var stale = {};
+         if ( !(stored.version >= 2) )
+         {
+            stale = { batchSize: true, maxPSFFits: true, useROI: true };
+            console.noteln( TITLE + ": the measurement now covers the central " +
+                            "half of each frame and fits at most " +
+                            settings.maxPSFFits + " stars, which is several " +
+                            "times faster. Both are in the Measurement panel." );
+         }
+
          for ( var key in settings )
-            if ( key != "criteria" && stored[key] !== undefined )
+            if ( key != "criteria" && !stale[key] && stored[key] !== undefined )
                settings[key] = stored[key];
          if ( stored.criteria )
             for ( var k in settings.criteria )
@@ -1468,8 +1484,12 @@ function SubframeCullerDialog()
    this.cache_Check.text = "Use the measurement cache";
    this.cache_Check.checked = settings.fileCache;
    this.cache_Check.toolTip =
-      "Reuses the measurements of frames already measured, which makes a " +
-      "second pass almost immediate.";
+      "<p>Reuses the measurements of frames already measured, which makes a " +
+      "second pass almost immediate.</p>" +
+      "<p>SubframeSelector keys the cache by the parameters the measurement " +
+      "was made with, so changing anything in this panel, the central region " +
+      "included, means the folder is measured again from scratch. It is " +
+      "worth settling on the settings before starting on a long night.</p>";
    this.cache_Check.onCheck = function( checked )
    {
       settings.fileCache = checked;
@@ -1497,7 +1517,9 @@ function SubframeCullerDialog()
    this.batch_Numeric.toolTip =
       "<p>Frames handed to SubframeSelector in a single execution. The " +
       "process reads and measures the frames of one execution in parallel, " +
-      "so larger batches use every core and are much faster.</p>" +
+      "so larger batches use every core and are much faster. A batch also " +
+      "ends waiting for its slowest frame, and the fewer batches there are " +
+      "the less time goes into that wait.</p>" +
       "<p>The progress report and the Stop button only act between batches, " +
       "which is the reason not to send the whole folder at once.</p>";
    this.batch_Numeric.onValueUpdated = function( value )
@@ -1514,7 +1536,10 @@ function SubframeCullerDialog()
       "<p>Upper limit on the stars fitted per frame. Fitting is the slowest " +
       "part of a measurement and a few hundred stars already give a stable " +
       "FWHM and eccentricity, so lowering this speeds up rich fields a " +
-      "lot.</p><p>Zero keeps the default of the process.</p>";
+      "lot. It costs nothing on a sparse field, where there are fewer stars " +
+      "than the limit anyway.</p>" +
+      "<p>Zero keeps the default of the process, which is to fit every star " +
+      "found.</p>";
    this.maxFits_Numeric.onValueUpdated = function( value )
    {
       settings.maxPSFFits = Math.round( value );

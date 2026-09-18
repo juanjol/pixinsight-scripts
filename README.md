@@ -36,10 +36,13 @@ subfolder and writes a CSV with every measurement; the accepted frames can also
 be gathered in an `accepted` subfolder, which is the folder to add as lights in
 WBPP.
 
-Measurement speed is tunable: frames are measured in batches so that
-SubframeSelector spreads them over every core, the number of PSF fits per frame
-can be capped, and the measurement can be restricted to a central region of the
-frame, which is the biggest saving of the three.
+Measurement speed is tunable, and the defaults are set for speed: the central
+half of each frame is measured, which costs a quarter of the area, at most five
+hundred stars are fitted per frame, and the frames go to SubframeSelector in
+large batches so that it spreads them over every core. Every one of the three
+can be turned off for a measurement over the whole frame. Note that
+SubframeSelector keys its measurement cache by the parameters a measurement was
+made with, so changing any of them means the folder is measured again.
 
 Installs under `SCRIPT > Toolbox > Subframe Culler`.
 
