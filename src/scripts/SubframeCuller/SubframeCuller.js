@@ -46,7 +46,7 @@
 #include <pjsr/NumericControl.jsh>
 
 #define TITLE        "Subframe Culler"
-#define VERSION      "1.2.0"
+#define VERSION      "1.2.1"
 #define SETTINGS_KEY "SubframeCuller/settings"
 
 #define COLOR_KEEP   0xff1e8f3e
@@ -86,6 +86,25 @@ function warnOnce( key, message )
       return;
    warnedAbout[key] = true;
    console.warningln( message );
+}
+
+/*
+ * Calls the first of several alternatives that the running version accepts.
+ * Signatures do change between versions, and a call that is refused must not
+ * take down what comes after it.
+ */
+function callFirst( alternatives )
+{
+   for ( var i = 0; i < alternatives.length; ++i )
+      try
+      {
+         alternatives[i]();
+         return true;
+      }
+      catch ( x )
+      {
+      }
+   return false;
 }
 
 /*
@@ -276,34 +295,53 @@ function tailFitsAt( row, start )
        && v.altitude >= -90 && v.altitude <= 90;
 }
 
-function layoutFor( row )
+function layoutStartingAt( start, columns )
 {
-   if ( row.length < LAYOUT_HEAD.length + LAYOUT_TAIL.length )
-      return null;
-
-   var start = -1;
-   for ( var i = row.length - LAYOUT_TAIL.length; i >= LAYOUT_HEAD.length; --i )
-      if ( tailFitsAt( row, i ) )
-      {
-         start = i;
-         break;
-      }
-   if ( start < 0 )
-      return null;
-
    var middle = [];
    var extra = start - LAYOUT_HEAD.length;
    if ( extra == LAYOUT_MIDDLE_1_8_9.length )
       middle = LAYOUT_MIDDLE_1_8_9;
    else
-      for ( var j = 0; j < extra; ++j )
-         middle.push( "unknown" + j );
+      for ( var i = 0; i < extra; ++i )
+         middle.push( "unknown" + i );
 
-   var layout = LAYOUT_HEAD.concat( middle );
-   return layout.concat( LAYOUT_TAIL );
+   var layout = LAYOUT_HEAD.concat( middle ).concat( LAYOUT_TAIL );
+
+   // Columns beyond the tail: another version added them, they are not read.
+   for ( var j = layout.length; j < columns; ++j )
+      layout.push( "trailing" + (j - layout.length) );
+
+   layout.tailStart = start;
+   return layout;
 }
 
-function rowToMeasurement( row )
+/*
+ * The position of the tail is looked for over every row of the table at once:
+ * one row can make a wrong position look plausible, a hundred frames of the
+ * same session cannot.
+ */
+function layoutForTable( table )
+{
+   if ( table.length == 0 )
+      return null;
+   var columns = table[0].length;
+   if ( columns < LAYOUT_HEAD.length + LAYOUT_TAIL.length )
+      return null;
+
+   for ( var start = columns - LAYOUT_TAIL.length;
+         start >= LAYOUT_HEAD.length; --start )
+   {
+      var fits = true;
+      for ( var r = 0; r < table.length && fits; ++r )
+         if ( table[r].length != columns || !tailFitsAt( table[r], start ) )
+            fits = false;
+      if ( fits )
+         return layoutStartingAt( start, columns );
+   }
+   return null;
+}
+
+function rowToMeasurement( row, layout )
 {
    var m = {};
 
@@ -313,11 +351,11 @@ function rowToMeasurement( row )
    for ( var k = 0; k < METRICS.length; ++k )
       m[METRICS[k].key] = NaN;
 
-   var layout = layoutFor( row );
    if ( layout == null )
    {
       // The tail was not found: only the leading fields can be trusted.
       layout = LAYOUT_HEAD;
+      layout.tailStart = -1;
       m.partial = true;
    }
    for ( var i = 0; i < layout.length && i < row.length; ++i )
@@ -328,7 +366,7 @@ function rowToMeasurement( row )
       m.snrWeight = m.psfSNR;
 
    m.columns = row.length;
-   m.tailStart = layout.length - LAYOUT_TAIL.length;
+   m.tailStart = layout.tailStart;
 
    m.path = String( m.path );
    m.fileName = fileNameOf( m.path );
@@ -568,6 +606,8 @@ function centralROI( geometry, percent )
  * button. The measurement cache makes a second pass over the same folder
  * almost immediate.
  */
+var detectedLayout = null;
+
 function measureBatch( paths, roi )
 {
    var P = newSubframeSelector( paths, roi );
@@ -577,10 +617,19 @@ function measureBatch( paths, roi )
    if ( table == null )
       return [];
 
+   // The layout is worked out once and then kept, so that every frame of a run
+   // is read the same way even if a later batch is too small to confirm it.
+   if ( detectedLayout == null || detectedLayout.columns != table[0].length )
+   {
+      detectedLayout = layoutForTable( table );
+      if ( detectedLayout != null )
+         detectedLayout.columns = table[0].length;
+   }
+
    var result = [];
    for ( var i = 0; i < table.length; ++i )
    {
-      var m = rowToMeasurement( table[i] );
+      var m = rowToMeasurement( table[i], detectedLayout );
       if ( m.path.length == 0 )
       {
          // Some builds return an empty path; the rows keep the input order.
@@ -622,6 +671,21 @@ function transferFile( sourcePath, targetPath, move )
  * The screen transfer function PixInsight applies with its automatic stretch.
  * A light frame is linear, so without it the preview is a black rectangle.
  */
+/*
+ * The midtones transfer function. PJSR offers it as a global in some versions
+ * and not in others, and it is three lines, so it is spelled out here.
+ */
+function midtonesTransfer( m, x )
+{
+   if ( x <= 0 )
+      return 0;
+   if ( x >= 1 )
+      return 1;
+   if ( x == m )
+      return 0.5;
+   return ((m - 1)*x)/(((2*m - 1)*x) - m);
+}
+
 function applyAutoSTF( view )
 {
    var shadowsClipping = -2.8;   // in MAD units from the median
@@ -635,17 +699,21 @@ function applyAutoSTF( view )
 
       var c0 = (mad > 0) ? Math.min( 1, Math.max( 0, median + shadowsClipping*mad ) )
                          : 0;
-      var m = mtf( targetBackground, median - c0 );
-      var stretch = [ c0, 1, m, 0, 1 ];
+      var m = midtonesTransfer( targetBackground, median - c0 );
 
+      // The process takes each channel as [ c0, c1, m, r0, r1 ].
+      var stretch = [ c0, 1, m, 0, 1 ];
       var P = new ScreenTransferFunction;
       P.STF = [ stretch, stretch, stretch, [ 0, 1, 0.5, 0, 1 ] ];
-      P.executeOn( view );
+      if ( !P.executeOn( view ) )
+         throw new Error( "ScreenTransferFunction returned false" );
    }
    catch ( x )
    {
-      warnOnce( "stf", "The automatic stretch could not be applied to the " +
-                       "preview: " + x );
+      // Worth saying out loud: a linear frame with no stretch is black, and a
+      // black preview looks like a broken file rather than a missing stretch.
+      warnOnce( "stf", "The automatic stretch could not be applied: " + x +
+                       " The preview of a linear frame will look black." );
    }
 }
 
@@ -1645,6 +1713,7 @@ function SubframeCullerDialog()
       this.setBusy( true );
       this.measurements = [];
       this.tree.clear();
+      detectedLayout = null;
 
       console.show();
       console.writeln( "<end><cbr><br>" + TITLE + ": measuring " +
@@ -1970,18 +2039,31 @@ function SubframeCullerDialog()
          for ( var i = 0; i < windows.length; ++i )
          {
             var w = windows[i];
+
+            // The window is shown before anything is applied to it: a process
+            // executed on the view of a window that is not on screen yet does
+            // not always reach the display.
+            w.show();
             if ( settings.previewStretch )
                applyAutoSTF( w.mainView );
-            w.show();
-            w.zoomToFit( false );
+
+            // zoomToFit takes no arguments in some versions and two in others.
+            if ( !callFirst( [ function() { w.zoomToFit(); },
+                               function() { w.zoomToFit( false ); },
+                               function() { w.zoomToOptimalFit(); },
+                               function() { w.fitWindow(); } ] ) )
+               warnOnce( "zoom", "The preview could not be zoomed to fit." );
+
             this.previewWindows.push( w );
          }
          windows[0].bringToFront();
       }
       catch ( x )
       {
-         ( new MessageBox( m.fileName + ": " + x,
-                           TITLE, StdIcon_Error, StdButton_Ok ) ).execute();
+         // Reported on the console rather than in a message box: a modal box
+         // freezes PixInsight, which is the opposite of what opening a frame
+         // is for.
+         console.criticalln( m.fileName + ": " + x );
       }
    };
 
@@ -2221,12 +2303,17 @@ function main()
    // The dialog is modeless so that PixInsight stays usable while the frames
    // are being reviewed. The script has to stay alive for the window to exist,
    // hence the event loop.
+   //
+   // PixInsight only gets to handle its own events inside processEvents(), so
+   // the pause between two calls is how long panning or zooming an opened
+   // frame goes unanswered. A few milliseconds cost nothing and are the
+   // difference between a window that responds and one that feels frozen.
    var dialog = new SubframeCullerDialog();
    dialog.show();
    while ( dialog.visible )
    {
       processEvents();
-      msleep( 20 );
+      msleep( 3 );
    }
 
    saveSettings( settings );
