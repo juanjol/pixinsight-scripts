@@ -19,6 +19,19 @@ Everything is a single package, so all the scripts are installed at once.
 
 ## What is in the repository
 
+### Subframe Culler
+
+Loads a folder of lights, measures every frame with SubframeSelector (FWHM,
+eccentricity, SNR, background, noise, star count, star residual, altitude...)
+and lets you cull them interactively. Each variable can filter with absolute
+limits or with a k-sigma clip around the median of the batch, the file list is
+coloured green or red in real time, and the panel shows how many frames survive
+and how the median quality improves. Frames can be pinned so the filters never
+touch them. Accepting moves the rejected files to a `rejects` subfolder and
+writes a CSV with every measurement.
+
+Installs under `SCRIPT > Toolbox > Subframe Culler`.
+
 ### Processing Checklist
 
 An interactive processing cheat sheet: keep several workflows, tick off each

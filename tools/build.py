@@ -29,7 +29,14 @@ PACKAGE_NAME = "PixInsightScripts"
 PACKAGE_TITLE = "PixInsight Scripts"
 PACKAGE_SOURCE = "src/scripts"
 
-PACKAGE_DESCRIPTION = """Processing Checklist - an interactive processing cheat sheet. Keeps
+PACKAGE_DESCRIPTION = """Subframe Culler - measures a folder of light frames with
+               SubframeSelector and lets you cull them interactively. Absolute
+               or k-sigma limits on FWHM, eccentricity, SNR, background and the
+               rest of the measured variables, the file list coloured in real
+               time, and the rejected frames moved to a subfolder.
+            </p>
+            <p>
+               Processing Checklist - an interactive processing cheat sheet. Keeps
                several predefined or user-defined workflows, lets you tick off
                each step as you go, and opens the PixInsight process associated
                with every step.
@@ -43,8 +50,8 @@ PACKAGE_DESCRIPTION = """Processing Checklist - an interactive processing cheat 
                Everything installs under SCRIPT &gt; Toolbox."""
 
 REPO_DESCRIPTION = """PixInsight scripts repository. A single package with every script:
-         Processing Checklist, Add Prefix and Add Suffix, all under
-         SCRIPT &gt; Toolbox."""
+         Subframe Culler, Processing Checklist, Add Prefix and Add Suffix, all
+         under SCRIPT &gt; Toolbox."""
 
 # --- Implementation ----------------------------------------------------------
 
