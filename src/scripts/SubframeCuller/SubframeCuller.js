@@ -42,7 +42,7 @@
 #include <pjsr/NumericControl.jsh>
 
 #define TITLE        "Subframe Culler"
-#define VERSION      "1.1.0"
+#define VERSION      "1.1.1"
 #define SETTINGS_KEY "SubframeCuller/settings"
 
 #define COLOR_KEEP   0xff1e8f3e
@@ -188,38 +188,61 @@ var LIST_COLUMNS = [ "fwhm", "eccentricity", "snrWeight", "median", "noise",
 // never moved, which is what makes the fallback usable.
 // ----------------------------------------------------------------------------
 
-var LAYOUT_COMMON = [ "index", "enabled", "locked", "path", "weight", "fwhm",
-                      "eccentricity" ];
+/*
+ * Every field the table has ever started with...
+ */
+var LAYOUT_HEAD = [ "index", "enabled", "locked", "path", "weight", "fwhm",
+                    "eccentricity" ];
 
-var LAYOUT_1_8_8 = LAYOUT_COMMON.concat(
-   [ "snrWeight", "median", "medianMeanDev", "noise", "noiseRatio", "stars",
-     "starResidual", "fwhmMeanDev", "eccentricityMeanDev",
-     "starResidualMeanDev", "azimuth", "altitude" ] );
+/*
+ * ...and every field it has ever ended with. The PSF signal estimators of
+ * PixInsight 1.8.9 were inserted between the two, and a later version may well
+ * insert more, so the table is read from both ends instead of being matched
+ * against a known length: whatever sits in the middle is named only when the
+ * length is one this script recognises.
+ */
+var LAYOUT_TAIL = [ "snrWeight", "median", "medianMeanDev", "noise",
+                    "noiseRatio", "stars", "starResidual", "fwhmMeanDev",
+                    "eccentricityMeanDev", "starResidualMeanDev", "azimuth",
+                    "altitude" ];
 
-var LAYOUT_1_8_9 = LAYOUT_COMMON.concat(
+var LAYOUT_MIDDLE_1_8_9 =
    [ "psfSignalWeight", "psfSNR", "psfScale", "psfScaleSNR", "psfFlux",
      "psfFluxPower", "psfTotalMeanFlux", "psfTotalMeanPowerFlux", "psfCount",
-     "mStar", "nStar", "snrWeight", "median", "medianMeanDev", "noise",
-     "noiseRatio", "stars", "starResidual", "fwhmMeanDev",
-     "eccentricityMeanDev", "starResidualMeanDev", "azimuth", "altitude" ] );
+     "mStar", "nStar" ];
 
 function layoutFor( columns )
 {
-   if ( columns == LAYOUT_1_8_9.length )
-      return LAYOUT_1_8_9;
-   if ( columns == LAYOUT_1_8_8.length )
-      return LAYOUT_1_8_8;
-   return null;
+   var known = LAYOUT_HEAD.length + LAYOUT_TAIL.length;
+   if ( columns < known )
+      return null;
+
+   var middle = [];
+   var extra = columns - known;
+   if ( extra == LAYOUT_MIDDLE_1_8_9.length )
+      middle = LAYOUT_MIDDLE_1_8_9;
+   else
+      for ( var i = 0; i < extra; ++i )
+         middle.push( "unknown" + i );
+
+   return LAYOUT_HEAD.concat( middle ).concat( LAYOUT_TAIL );
 }
 
 function rowToMeasurement( row )
 {
-   var layout = layoutFor( row.length );
    var m = {};
+
+   // Every measured variable exists from the start, so that a variable this
+   // build does not report reads as a missing number instead of as a missing
+   // property.
+   for ( var k = 0; k < METRICS.length; ++k )
+      m[METRICS[k].key] = NaN;
+
+   var layout = layoutFor( row.length );
    if ( layout == null )
    {
-      // Unknown build: keep the fields that have never changed position.
-      layout = LAYOUT_COMMON;
+      // Shorter than anything known: only the leading fields can be trusted.
+      layout = LAYOUT_HEAD;
       m.partial = true;
    }
    for ( var i = 0; i < layout.length && i < row.length; ++i )
@@ -228,6 +251,8 @@ function rowToMeasurement( row )
    // Older builds have no PSF SNR, newer ones report both estimators.
    if ( !isFiniteNumber( m.snrWeight ) && isFiniteNumber( m.psfSNR ) )
       m.snrWeight = m.psfSNR;
+
+   m.columns = row.length;
 
    m.path = String( m.path );
    m.fileName = fileNameOf( m.path );
@@ -1477,9 +1502,20 @@ function SubframeCullerDialog()
 
       if ( partial )
          console.warningln(
-            "This build of SubframeSelector reports a measurements table this " +
-            "script does not know in full. FWHM and eccentricity are " +
+            "This build of SubframeSelector reports a measurements table " +
+            "shorter than any this script knows. FWHM and eccentricity are " +
             "available, the rest of the variables are not." );
+      else if ( this.measurements.length > 0 )
+      {
+         var columns = this.measurements[0].columns;
+         var extra = columns - LAYOUT_HEAD.length - LAYOUT_TAIL.length;
+         if ( extra != 0 && extra != LAYOUT_MIDDLE_1_8_9.length )
+            console.noteln( format(
+               "The measurements table of this build has %d columns. Every " +
+               "variable this script filters by was read; %d columns in the " +
+               "middle of the table are not named here and were ignored.",
+               columns, extra ) );
+      }
 
       if ( failed.length > 0 )
       {
